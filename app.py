@@ -460,3 +460,7 @@ def report_misinformation_api():
 if __name__ == "__main__":
     scheduled_scrape()
     app.run(debug=True, host="0.0.0.0")
+
+
+    # nothing to add 
+    
