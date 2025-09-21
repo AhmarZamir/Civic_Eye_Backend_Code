@@ -3,7 +3,6 @@ from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from transformers import pipeline
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import sqlite3
@@ -12,7 +11,22 @@ import schedule
 import threading
 import atexit
 import json
-import torch
+import requests
+
+# ------------------- Hugging Face API Config -------------------
+API_URL_SUMMARY = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
+API_URL_SENTIMENT = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
+headers = {"Authorization": f"Bearer YOUR_HF_API_KEY"}  # replace with your API key
+
+
+def query_huggingface(payload, api_url):
+    response = requests.post(api_url, headers=headers, json=payload)
+    try:
+        return response.json()
+    except Exception as e:
+        print(f"HuggingFace API error: {e}, response: {response.text}")
+        return None
+
 
 # ------------------- Configuration -------------------
 SCRAPE_INTERVAL_MINUTES = 180  # 3 hours
@@ -24,10 +38,10 @@ class DatabaseManager:
     def __init__(self, db_file):
         self.db_file = db_file
         self._init_db()
-        
+
     def _init_db(self):
         with sqlite3.connect(self.db_file) as conn:
-            conn.row_factory = sqlite3.Row 
+            conn.row_factory = sqlite3.Row
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS headlinesData (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +77,7 @@ class DatabaseManager:
                 )
             ''')
             conn.commit()
-    
+
     def save_headline(self, headline_data):
         with sqlite3.connect(self.db_file) as conn:
             try:
@@ -82,7 +96,7 @@ class DatabaseManager:
                 conn.commit()
             except sqlite3.Error as e:
                 print(f"Database error saving headline: {e}")
-    
+
     def get_all_headlines(self):
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
@@ -162,7 +176,7 @@ class DatabaseManager:
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT upvotes, downvotes, upvoted_by, downvoted_by FROM civic_issues WHERE id = ?", (issue_id,))
             row = cursor.fetchone()
             if not row:
@@ -175,7 +189,7 @@ class DatabaseManager:
 
             if user_id in upvoted_by or user_id in downvoted_by:
                 return False, "User has already voted on this issue"
-            
+
             if vote_type == 'upvote':
                 current_upvotes += 1
                 upvoted_by.append(user_id)
@@ -206,7 +220,7 @@ class DatabaseManager:
             if new_status:
                 status_update_clause = ", status = ?"
                 update_params.append(new_status)
-            
+
             update_params.append(issue_id)
 
             try:
@@ -227,29 +241,11 @@ class DatabaseManager:
                 print(f"Database error updating status: {e}")
                 return False
 
+
 # ------------------- News Scraper -------------------
 class NewsScraper:
     def __init__(self):
         self.driver = None
-        # Initialize summarizer and sentiment analyzer with proper error handling
-        try:
-            self.summarizer = pipeline(
-                "summarization", 
-                model="facebook/bart-large-cnn",
-                device=0 if torch.cuda.is_available() else -1,
-                torch_dtype=torch.float16
-            )
-            self.sentiment_analyzer = pipeline("sentiment-analysis")
-        except Exception as e:
-            print(f"Error initializing NLP models: {e}")
-            # Fallback to smaller models if the large one fails
-            try:
-                self.summarizer = pipeline("summarization", model="t5-small")
-                self.sentiment_analyzer = pipeline("sentiment-analysis")
-                print("Using smaller models as fallback")
-            except Exception as fallback_error:
-                print(f"Failed to initialize fallback models: {fallback_error}")
-                raise RuntimeError("Could not initialize required NLP models")
 
     def initialize_driver(self):
         options = webdriver.ChromeOptions()
@@ -260,25 +256,25 @@ class NewsScraper:
             service=Service(ChromeDriverManager().install()),
             options=options
         )
-    
+
     def scrape_geo_news(self):
         if not self.driver:
             self.initialize_driver()
-            
+
         try:
             self.driver.get("https://www.geo.tv")
             time.sleep(3)
-            
+
             image_elements = self.driver.find_elements(By.CSS_SELECTOR, "img.lazyloaded")
             hrefs = list(set([
                 img.find_element(By.XPATH, "./ancestor::a[1]").get_attribute("href")
                 for img in image_elements
                 if img.find_elements(By.XPATH, "./ancestor::a[1]")
             ]))
-            
+
             print(f"Found {len(hrefs)} unique news links")
             headlines = []
-            
+
             for href in hrefs[:MAX_ARTICLES]:
                 try:
                     headline = self.process_article(href)
@@ -286,7 +282,7 @@ class NewsScraper:
                         headlines.append(headline)
                 except Exception as e:
                     print(f"Error processing {href}: {e}")
-            
+
             return headlines
         except Exception as e:
             print(f"Scraping error: {e}")
@@ -295,23 +291,31 @@ class NewsScraper:
             if self.driver:
                 self.driver.quit()
                 self.driver = None
-    
+
     def process_article(self, url):
         self.driver.get(url)
         time.sleep(2)
         soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-        
+
         heading = soup.find("div", class_="heading_H").find("h1").text.strip()
         image = soup.find("div", class_="content-area").find('img').get("src")
         paragraphs = soup.find("div", class_="content-area").find_all('p')
         text = " ".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
-        
+
         if not text:
             return None
-            
-        summary = self.summarizer(text, max_length=300, min_length=100, do_sample=False)[0]['summary_text']
-        sentiment = self.sentiment_analyzer(summary)[0]
-        
+
+        # Summarization via Hugging Face API
+        summary_resp = query_huggingface({"inputs": text, "parameters": {"min_length": 100, "max_length": 300}}, API_URL_SUMMARY)
+        summary = summary_resp[0]['summary_text'] if summary_resp and isinstance(summary_resp, list) else text[:500]
+
+        # Sentiment via Hugging Face API
+        sentiment_resp = query_huggingface({"inputs": summary}, API_URL_SENTIMENT)
+        if sentiment_resp and isinstance(sentiment_resp, list):
+            sentiment = sentiment_resp[0]
+        else:
+            sentiment = {"label": "NEUTRAL", "score": 0.0}
+
         return {
             "url": url,
             "picture": image,
@@ -321,11 +325,13 @@ class NewsScraper:
             "confidence": round(sentiment["score"], 2)
         }
 
+
 # ------------------- Flask App -------------------
 app = Flask(__name__)
 CORS(app)
 db = DatabaseManager(DATABASE_FILE)
 scraper = NewsScraper()
+
 
 def scheduled_scrape():
     print("Running scheduled news scrape...")
@@ -337,14 +343,17 @@ def scheduled_scrape():
     except Exception as e:
         print(f"Scheduled job failed: {e}")
 
+
 # Schedule scraping job
 schedule.every(SCRAPE_INTERVAL_MINUTES).minutes.do(scheduled_scrape)
+
 
 # Run scheduled jobs in a background thread
 def run_scheduler():
     while True:
         schedule.run_pending()
         time.sleep(1)
+
 
 scheduler_thread = threading.Thread(target=run_scheduler)
 scheduler_thread.daemon = True
@@ -353,6 +362,7 @@ scheduler_thread.start()
 # Ensure cleanup on exit
 atexit.register(lambda: scraper.driver.quit() if scraper.driver else None)
 
+
 @app.route("/scrape", methods=["GET"])
 def manual_scrape():
     headlines = scraper.scrape_geo_news()
@@ -360,16 +370,18 @@ def manual_scrape():
         db.save_headline(headline)
     return jsonify({"status": "success", "count": len(headlines)})
 
+
 @app.route("/news", methods=["GET"])
 def get_news():
     return jsonify(db.get_all_headlines())
+
 
 @app.route("/report_issue", methods=["POST"])
 def report_issue():
     issue_data = request.json
     if not issue_data:
         return jsonify({"error": "Invalid JSON data"}), 400
-    
+
     required_fields = ['issueType', 'description', 'location', 'reporterId']
     if not all(field in issue_data for field in required_fields):
         return jsonify({"error": "Missing required issue fields"}), 400
@@ -379,6 +391,7 @@ def report_issue():
         return jsonify({"status": "success", "issue_id": issue_id}), 201
     else:
         return jsonify({"error": "Failed to save issue"}), 500
+
 
 @app.route("/my_issues/<string:reporter_id>", methods=["GET"])
 def get_my_issues(reporter_id):
@@ -390,7 +403,7 @@ def get_my_issues(reporter_id):
         formatted_issue['specificIssueType'] = formatted_issue.pop('specific_issue_type')
         formatted_issue['reporterId'] = formatted_issue.pop('reporter_id')
         formatted_issue['mediaUrls'] = formatted_issue.pop('media_urls')
-        
+
         formatted_issue['location'] = {
             'latitude': formatted_issue.pop('location_lat'),
             'longitude': formatted_issue.pop('location_lon'),
@@ -401,8 +414,9 @@ def get_my_issues(reporter_id):
         }
         formatted_issue['dateReported'] = issue['timestamp'].split(' ')[0]
         formatted_issues.append(formatted_issue)
-    
+
     return jsonify(formatted_issues)
+
 
 @app.route("/community_issues", methods=["GET"])
 def get_community_issues_api():
@@ -428,6 +442,7 @@ def get_community_issues_api():
         formatted_issues.append(formatted_issue)
     return jsonify(formatted_issues)
 
+
 @app.route("/vote_issue", methods=["POST"])
 def vote_issue():
     data = request.json
@@ -444,23 +459,21 @@ def vote_issue():
     else:
         return jsonify({"error": message}), 400
 
+
 @app.route("/report_misinformation", methods=["POST"])
 def report_misinformation_api():
     data = request.json
     issue_id = data.get('issue_id')
     if not issue_id:
         return jsonify({"error": "Missing issue_id"}), 400
-    
+
     success = db.update_issue_status(issue_id, 'Misinformation Flagged')
     if success:
         return jsonify({"status": "success", "message": "Issue flagged as misinformation"}), 200
     else:
         return jsonify({"error": "Failed to flag issue"}), 500
 
+
 if __name__ == "__main__":
     scheduled_scrape()
     app.run(debug=True, host="0.0.0.0")
-
-
-    # nothing to add 
-    
