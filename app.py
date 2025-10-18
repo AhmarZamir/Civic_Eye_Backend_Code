@@ -29,7 +29,7 @@ def query_huggingface(payload, api_url):
 
 
 # ------------------- Configuration -------------------
-SCRAPE_INTERVAL_MINUTES = 180  # 3 hours
+SCRAPE_INTERVAL_MINUTES = 30  # 3 hours
 MAX_ARTICLES = 50
 DATABASE_FILE = "civic_eye.db"
 
@@ -103,8 +103,8 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT url, picture, heading, blog, sentiment, confidence 
-                FROM headlinesData 
                 ORDER BY timestamp DESC 
+                FROM headlinesData 
                 LIMIT ?
             ''', (MAX_ARTICLES,))
             return [dict(row) for row in cursor.fetchall()]
@@ -263,7 +263,7 @@ class NewsScraper:
 
         try:
             self.driver.get("https://www.geo.tv")
-            time.sleep(3)
+            time.sleep(6)
 
             image_elements = self.driver.find_elements(By.CSS_SELECTOR, "img.lazyloaded")
             hrefs = list(set([
