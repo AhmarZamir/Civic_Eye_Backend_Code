@@ -18,13 +18,23 @@ API_URL_SUMMARY = "https://api-inference.huggingface.co/models/facebook/bart-lar
 API_URL_SENTIMENT = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
 headers = {"Authorization": f"Bearer YOUR_HF_API_KEY"}  # replace with your API key
 
-
 def query_huggingface(payload, api_url):
-    response = requests.post(api_url, headers=headers, json=payload)
     try:
+        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 503:
+            print(f"Model is loading, please wait...")
+            return None
+        elif response.status_code != 200:
+            print(f"API error {response.status_code}: {response.text}")
+            return None
+            
         return response.json()
+    except requests.exceptions.Timeout:
+        print(f"HuggingFace API timeout for {api_url}")
+        return None
     except Exception as e:
-        print(f"HuggingFace API error: {e}, response: {response.text}")
+        print(f"HuggingFace API error: {e}")
         return None
 
 
@@ -102,12 +112,13 @@ class DatabaseManager:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT url, picture, heading, blog, sentiment, confidence 
-                ORDER BY timestamp DESC 
+                SELECT url, picture, heading, blog, sentiment, confidence t, confidence 
                 FROM headlinesData 
+                ORDER BY timestamp DESC 
                 LIMIT ?
             ''', (MAX_ARTICLES,))
             return [dict(row) for row in cursor.fetchall()]
+        
 
     def save_civic_issue(self, issue_data):
         with sqlite3.connect(self.db_file) as conn:
@@ -248,49 +259,171 @@ class NewsScraper:
         self.driver = None
 
     def initialize_driver(self):
-        options = webdriver.ChromeOptions()
-        options.add_argument('--headless')
+     try:
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        
+        options = Options()
+        options.add_argument('--headless=new')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        # Set user agent to avoid detection
+        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        
         self.driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
             options=options
         )
+        
+        # Additional anti-detection measures
+        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+     except Exception as e:
+         print(f"Chrome driver initialization failed: {e}")
+        # Fallback: you might want to use requests instead
+         self.driver = None
 
+    
+    
+    
     def scrape_geo_news(self):
-        if not self.driver:
-            self.initialize_driver()
+     if not self.driver:
+        self.initialize_driver()
+    
+     if not self.driver:
+        print("Selenium not available, falling back to requests")
+        return self.scrape_geo_news_requests()  # You'll need to implement this fallback
 
-        try:
-            self.driver.get("https://www.geo.tv")
-            time.sleep(6)
+     try:
+        self.driver.get("https://www.geo.tv")
+        time.sleep(6)
 
-            image_elements = self.driver.find_elements(By.CSS_SELECTOR, "img.lazyloaded")
-            hrefs = list(set([
-                img.find_element(By.XPATH, "./ancestor::a[1]").get_attribute("href")
-                for img in image_elements
-                if img.find_elements(By.XPATH, "./ancestor::a[1]")
-            ]))
+        image_elements = self.driver.find_elements(By.CSS_SELECTOR, "img.lazyloaded")
+        hrefs = list(set([
+            img.find_element(By.XPATH, "./ancestor::a[1]").get_attribute("href")
+            for img in image_elements
+            if img.find_elements(By.XPATH, "./ancestor::a[1]")
+        ]))
 
-            print(f"Found {len(hrefs)} unique news links")
-            headlines = []
+        print(f"Found {len(hrefs)} unique news links")
+        headlines = []
 
-            for href in hrefs[:MAX_ARTICLES]:
-                try:
-                    headline = self.process_article(href)
-                    if headline:
-                        headlines.append(headline)
-                except Exception as e:
-                    print(f"Error processing {href}: {e}")
+        for href in hrefs[:MAX_ARTICLES]:
+            try:
+                headline = self.process_article(href)
+                if headline:
+                    headlines.append(headline)
+            except Exception as e:
+                print(f"Error processing {href}: {e}")
 
-            return headlines
-        except Exception as e:
-            print(f"Scraping error: {e}")
-            return []
-        finally:
-            if self.driver:
-                self.driver.quit()
-                self.driver = None
+        return headlines
+     except Exception as e:
+        print(f"Scraping error: {e}")
+        return []
+     finally:
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
+    
+    
+    def scrape_geo_news_requests(self):
+    # """Fallback scraper using requests and BeautifulSoup"""
+     try:
+        import requests
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        response = requests.get('https://www.geo.tv/latest-news', headers=headers)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        headlines = []
+        
+        # Find news articles - you'll need to adjust selectors based on Geo.tv's structure
+        articles = soup.find_all('article') or soup.find_all('div', class_='news-item')
+        
+        for article in articles[:MAX_ARTICLES]:
+            try:
+                link = article.find('a')
+                if not link:
+                    continue
+                    
+                url = link.get('href')
+                if url and not url.startswith('http'):
+                    url = 'https://www.geo.tv' + url
+                
+                title_elem = article.find(['h1', 'h2', 'h3'])
+                title = title_elem.get_text().strip() if title_elem else "No title"
+                
+                img_elem = article.find('img')
+                image = img_elem.get('src') if img_elem else None
+                
+                if url and title != "No title":
+                    # For fallback, use title as summary
+                    headline_data = {
+                        "url": url,
+                        "picture": image or "",
+                        "heading": title,
+                        "blog": title,  # Using title as placeholder
+                        "sentiment": "NEUTRAL",
+                        "confidence": 0.5
+                    }
+                    headlines.append(headline_data)
+                    
+            except Exception as e:
+                print(f"Error processing article: {e}")
+                continue
+        
+        print(f"Requests fallback found {len(headlines)} articles")
+        return headlines
+        
+     except Exception as e:
+        print(f"Requests fallback scraping error: {e}")
+        return []
+    
+    
+
+    
+    
+    
+
+    
+    
+    
+
+   
+
+    
+    
+    
+    
+
+    
+    
+
+    
+    
+    
+    
+    
+    
+    
+
+    
+    
+    
+    
+    
+    
+    
+    
 
     def process_article(self, url):
         self.driver.get(url)
