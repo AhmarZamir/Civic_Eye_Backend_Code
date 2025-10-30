@@ -28,7 +28,7 @@ if not HUGGINGFACE_API_KEY or HUGGINGFACE_API_KEY == 'YOUR_HF_API_KEY':
 headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"} if HUGGINGFACE_API_KEY else {}
 
 # ------------------- Configuration -------------------
-MAX_ARTICLES = 100
+MAX_ARTICLES = 20
 
 # Initialize Supabase
 supabase: Client = create_client(
@@ -356,7 +356,7 @@ def scrape_and_save():
 def get_news():
     """Endpoint to get all news from database"""
     try:
-        limit = request.args.get('limit', default=200, type=int)
+        limit = request.args.get('limit', default=20, type=int)
         sentiment_filter = request.args.get('sentiment', default=None, type=str)
         
         query = supabase.table("headlinesdata").select("*").order("timestamp", desc=True).limit(limit)
